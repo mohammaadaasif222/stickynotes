@@ -894,7 +894,30 @@ const NoteCard = ({ note, onEdit, onDelete, onAddCollaborator, onViewHistory, ac
 const Notes = () => {
   const dispatch = useDispatch();
   const { notes, isLoading, searchQuery, sortBy, sortOrder } = useSelector(state => state.notes);
-  const { isConnected, realtimeUpdates, getRecentUpdates, clearRealtimeUpdate } = useNotesSocket();
+  const { 
+    isConnected, 
+    realtimeUpdates, 
+    getRecentUpdates, 
+    clearRealtimeUpdate,
+    onNoteUpdated,
+    onNoteDeleted,
+    onNoteCreated,
+    activeUsers
+  } = useNotesSocket({
+    enableGlobalUpdates: true, // Enable real-time updates for all notes
+    onNoteUpdated: (data) => {
+      // Re-fetch notes when a note is updated
+      dispatch(fetchNotes());
+    },
+    onNoteDeleted: (data) => {
+      // Re-fetch notes when a note is deleted
+      dispatch(fetchNotes());
+    },
+    onNoteCreated: (data) => {
+      // Re-fetch notes when a new note is created
+      dispatch(fetchNotes());
+    }
+  });
   const searchTimeout = useRef(null);
   const [showHistory, setShowHistory] = useState(false);
    

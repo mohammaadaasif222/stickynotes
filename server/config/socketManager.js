@@ -835,7 +835,7 @@ class SocketManager {
 
   async handleContentChange(socket, data) {
     try {
-      const { noteId, content, operation, position, length, timestamp } = data;
+      const { noteId, content, operation, position, length, timestamp, clientVersion } = data;
       
       if (!noteId || socket.currentNoteId !== noteId) {
         socket.emit('error', { message: 'Not connected to this note' });
@@ -848,19 +848,67 @@ class SocketManager {
         return;
       }
 
+      // Check for version conflicts
+      if (clientVersion && clientVersion !== note.version) {
+        console.log(`Version conflict detected. Client: ${clientVersion}, Server: ${note.version}`);
+        
+        // Request client to sync
+        socket.emit('sync-required', {
+          noteId,
+          serverVersion: note.version,
+          message: 'Content is out of sync with server'
+        });
+        return;
+      }
+
+      // Generate operation based on the change
+      const op = {
+        type: operation,
+        position: position,
+        text: operation === 'insert' ? content.slice(position, position + length) : undefined,
+        length: operation === 'delete' ? length : undefined,
+        userId: socket.userId,
+        timestamp: timestamp || Date.now(),
+        version: note.version
+      };
+
+      // Store operation and apply transform if needed
+      if (!this.pendingOperations) {
+        this.pendingOperations = new Map();
+      }
+
+      if (!this.pendingOperations.has(noteId)) {
+        this.pendingOperations.set(noteId, []);
+      }
+
+      const pendingOps = this.pendingOperations.get(noteId);
+      const { transformOperation } = require('../utils/operationalTransform');
+
+      // Transform current operation against all pending operations
+      let transformedOp = { ...op };
+      for (const pendingOp of pendingOps) {
+        transformedOp = transformOperation(transformedOp, pendingOp);
+      }
+
+      // Add to pending operations
+      pendingOps.push(transformedOp);
+
       const changeData = {
         userId: socket.userId,
         user: socket.user,
         noteId,
-        operation,
-        content,
-        position,
-        length,
-        timestamp: timestamp || Date.now(),
-        version: note.version || 1
+        operation: transformedOp.type,
+        position: transformedOp.position,
+        text: transformedOp.text,
+        length: transformedOp.length,
+        timestamp: transformedOp.timestamp,
+        version: note.version
       };
 
+      // Broadcast the transformed operation to other clients
       socket.to(`note-${noteId}`).emit('content-changed', changeData);
+
+      // Save changes
       this.debouncedSave(noteId, content, socket.userId);
 
       console.log(`Content change processed for note ${noteId} by user ${socket.userId}`);
@@ -959,8 +1007,14 @@ class SocketManager {
         note.version = (note.version || 1) + 1;
         await note.save();
 
+        // Clear pending operations after successful save
+        if (this.pendingOperations && this.pendingOperations.has(noteId)) {
+          this.pendingOperations.delete(noteId);
+        }
+
         this.io.to(`note-${noteId}`).emit('auto-saved', {
           noteId,
+          content: note.content,
           version: note.version,
           timestamp: Date.now()
         });

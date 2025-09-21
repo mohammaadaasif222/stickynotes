@@ -62,28 +62,72 @@ export const useNotesSocket = (options = {}) => {
     });
   }, [generateUpdateId]);
 
-  // Handle content synchronization
+  // Handle content synchronization with version control
   const handleContentSync = useCallback((data) => {
     if (!enableAutoSync) return;
 
     setCurrentNoteData(prev => {
       if (!prev || prev._id !== data.noteId) return prev;
 
-      if (data.version && prev.version && data.version > prev.version) {
-        console.log('Note version outdated, requesting sync');
+      const { content, version, operation, position, text, length } = data;
+
+      // If this is a version conflict notification, request a sync
+      if (data.type === 'sync-required') {
+        console.log('Version conflict detected, requesting sync');
         socketService.requestSync(data.noteId, prev.version);
         return prev;
       }
 
-      return {
-        ...prev,
-        content: data.content || prev.content,
-        version: data.version || prev.version,
-        lastEditedBy: data.lastEditedBy || prev.lastEditedBy,
-        updatedAt: data.timestamp || prev.updatedAt
-      };
+      // If this is an operation-based change
+      if (operation && prev.version === version) {
+        const { transformOperation, applyOperation } = require('../../server/utils/operationalTransform');
+        
+        // Transform any pending local operations against the received operation
+        let newContent = prev.content;
+        
+        // Apply the transformed operation
+        const op = {
+          type: operation,
+          position: position,
+          text: text,
+          length: length
+        };
+        
+        newContent = applyOperation(newContent, op);
+
+        const updatedNote = {
+          ...prev,
+          content: newContent,
+          version: version,
+          lastEditedBy: data.lastEditedBy || prev.lastEditedBy,
+          updatedAt: data.timestamp || prev.updatedAt
+        };
+
+        // Update the Redux store
+        dispatch(updateNoteFromSocket(updatedNote));
+
+        return updatedNote;
+      }
+
+      // If this is a full content update (after sync)
+      if (content !== undefined && (!prev.version || version > prev.version)) {
+        const updatedNote = {
+          ...prev,
+          content: content,
+          version: version,
+          lastEditedBy: data.lastEditedBy || prev.lastEditedBy,
+          updatedAt: data.timestamp || prev.updatedAt
+        };
+
+        // Update the Redux store
+        dispatch(updateNoteFromSocket(updatedNote));
+
+        return updatedNote;
+      }
+
+      return prev;
     });
-  }, [enableAutoSync]);
+  }, [enableAutoSync, dispatch]);
 
   // Setup socket listeners
   const setupSocketListeners = useCallback(() => {
@@ -404,10 +448,20 @@ export const useNotesSocket = (options = {}) => {
       console.log('Auto-saved in hook:', data);
       addRealtimeUpdate('auto-saved', 'Changes saved automatically', false, data);
 
-      // Update local version
+      // Update local version and content
       setCurrentNoteData(prev => {
         if (!prev || prev._id !== data.noteId) return prev;
-        return { ...prev, version: data.version };
+        const updatedNote = { 
+          ...prev, 
+          version: data.version,
+          content: data.content,
+          updatedAt: data.timestamp
+        };
+
+        // Update Redux store to reflect changes in the notes list
+        dispatch(updateNoteFromSocket(updatedNote));
+
+        return updatedNote;
       });
     };
 
@@ -428,22 +482,29 @@ export const useNotesSocket = (options = {}) => {
       setCurrentNoteData(prev => {
         if (!prev || prev._id !== data.noteId) return prev;
 
-        return {
+        const updatedNote = {
           ...prev,
           ...data.note,
           version: data.note.version,
           lastEditedBy: data.note.lastEditedBy,
           updatedAt: data.note.updatedAt
         };
+
+        // Update Redux store to reflect changes in the notes list
+        dispatch(updateNoteFromSocket(updatedNote));
+
+        return updatedNote;
       });
+
+      // If it's not the current note, still update the Redux store
+      if (data.note && !currentNoteData || data.note._id !== currentNoteData?._id) {
+        dispatch(updateNoteFromSocket(data.note));
+      }
 
       // Call custom handler
       if (onNoteUpdated) {
         onNoteUpdated(data);
       }
-
-      // Update Redux store if using Redux
-      // dispatch(updateNoteInList(data.note));
     };
 
     const onNoteDeletedEvent = (data) => {
@@ -467,8 +528,8 @@ export const useNotesSocket = (options = {}) => {
         onNoteDeleted(data);
       }
 
-      // Update Redux store if using Redux
-      // dispatch(removeNoteFromList(data.noteId));
+      // Update Redux store to remove note from list
+      dispatch(removeNoteFromSocket(data.noteId));
     };
 
     const onCollaboratorAdded = (data) => {
@@ -622,15 +683,25 @@ export const useNotesSocket = (options = {}) => {
     return success;
   }, []);
 
-  // Enhanced send content change with debouncing
+  // Enhanced send content change with versioning and transformation
   const sendContentChange = useCallback((noteId, content, operation, position, length) => {
     if (!socketService.isSocketConnected()) {
       addRealtimeUpdate('error', 'Cannot send changes: not connected', true);
       return false;
     }
 
-    return socketService.sendContentChange(noteId, content, operation, position, length);
-  }, [addRealtimeUpdate]);
+    // Get current version from note data
+    const currentNoteVersion = currentNoteData?.version || 1;
+
+    return socketService.sendContentChange(
+      noteId, 
+      content, 
+      operation, 
+      position, 
+      length,
+      currentNoteVersion
+    );
+  }, [addRealtimeUpdate, currentNoteData]);
 
   // Request sync with timeout
   const requestSync = useCallback((noteId, clientVersion) => {

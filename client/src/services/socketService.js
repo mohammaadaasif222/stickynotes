@@ -848,16 +848,17 @@ class SocketService {
   }
 
   // Send content change
-  sendContentChange(noteId, content, operation, position, length) {
+  sendContentChange(noteId, content, operation, position, length, version) {
     if (this.socket && this.isConnected && this.currentNoteId === noteId) {
-      console.log('Sending content change:', { noteId, operation, position, length });
+      console.log('Sending content change:', { noteId, operation, position, length, version });
       this.socket.emit('content-change', {
         noteId,
         content,
         operation,
         position,
         length,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        clientVersion: version
       });
       return true;
     } else {
